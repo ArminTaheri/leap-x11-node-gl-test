@@ -1,0 +1,25 @@
+{
+  "name": "leap-x11-node-gl-test",
+  "version": "1.0.0",
+  "main": "src/main.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "node ./node_modules/webpack/bin/webpack --config ./webpack.config.js",
+    "watch": "node ./node_modules/webpack/bin/webpack --watch --config ./webpack.config.js"
+  },
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "babel-core": "^6.25.0",
+    "babel-loader": "^7.1.1",
+    "babel-preset-env": "^1.6.0",
+    "webpack": "^3.3.0"
+  },
+  "dependencies": {
+    "jetty": "^0.2.1",
+    "leapjs": "^0.6.4",
+    "three": "^0.86.0",
+    "three-orbit-controls": "^82.1.0",
+    "x11": "^2.2.1"
+  }
+}
