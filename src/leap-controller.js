@@ -3,7 +3,7 @@ const x11 = require('x11');
 const XEventManager = require('./XEventManager');
 const Leap = require('leapjs');
 
-// Function programming libraries
+// Functional programming libraries
 const R = require('ramda');
 const M = require('ramda-fantasy').Maybe;
 const IO = require('ramda-fantasy').IO;
@@ -32,57 +32,136 @@ function log(string) {
 
 const present = require('present');
 let last = present();
-function delt() {
+function time() {
   out = String(present() - last);
   last = present();
   return out;
 }
 
+// PINCH_THRESHOLD: Number
+const PINCH_THRESHOLD = 0.93;
+
+// SCREEN_TO_HANDS_SCALE: Number
+const SCREEN_TO_HANDS_SCALE = 7;
+
+// SCROLL_TO_HANDS_SCALE: Number
+const SCROLL_TO_HANDS_SCALE = 0.0001;
+
+// getHand: String -> Frame -> Maybe Hand
+const getHand = hand => R.pipe(
+  R.prop('hands'),
+  R.filter(R.propEq('type', hand)),
+  R.ifElse(R.isEmpty, M.Nothing, R.compose(M.Just, R.head))
+);
+
+// leftHand: Frame -> Maybe Hand
+const leftHand = getHand('left');
+
+// rightHand: Frame -> Maybe Hand
+const rightHand = getHand('right');
+
+// displacementSince: Frame -> Hand -> Leap.Vec3
+const displacementSince = R.invoker(1, 'translation');
+
+// isPinched = Maybe Hand -> Boolean
+const isPinched = M.maybe(
+  false,
+  R.propSatisfies(R.gte(R.__, PINCH_THRESHOLD), 'pinchStrength')
+);
+
+// toMouseMove: Leap.Vec3 -> (Number, Number)
+const toMouseMove = R.pipe(
+  R.map(R.multiply(SCREEN_TO_HANDS_SCALE)),
+  v => [v[0], -v[1]] // Get X and -Y displacement;
+);
+
+// toMouseScroll: [Number] -> [Number]
+const toMouseScroll = R.map(
+  R.pipe(
+    R.multiply(-1),
+    R.multiply(SCROLL_TO_HANDS_SCALE)
+  )
+);
 
 
-function controllerLoop(em) {
+// last Frame and current frame getters: (Frame, Frame) -> Frame
+const lastframe = a => a[0];
+const curframe = a => a[1];
+
+// rightOnlyPinch: Frame -> Boolean
+const rightOnlyPinch = R.allPass([
+  R.compose(R.not, isPinched, leftHand),
+  R.compose(isPinched, rightHand)
+]);
+
+// leftrightPinch: Frame -> Boolean
+const leftrightPinch = R.allPass([
+  R.compose(isPinched, rightHand),
+  R.compose(isPinched, leftHand)
+]);
+
+// rightHandToMouse: (Frame, Frame) -> Maybe (Number, Number)
+const rightHandToMouse = R.pipe(
+  // wrap (frame, frame) in array
+  R.of,
+   // Bind getDisplacement with last fram and get rightHand from current frame
+  R.ap([R.compose(R.map, displacementSince, lastframe), R.compose(rightHand, curframe)]),
+  // Call the bound and lifted getDisplacement with the right hand
+  R.apply(R.call),
+  // Map to screen distplacement
+  R.map(toMouseMove)
+);
+
+// handDistance: Hand -> Hand -> Number
+const handDistance = (left, right) => {
+  const out = Leap.vec3.create();
+  Leap.vec3.subtract(out, left.palmPosition, right.palmPosition);
+  return Leap.vec3.length(out);
+}
+
+// handsDistanceMaybe: Frame -> Maybe Number
+const handsDistanceMaybe = R.pipe(
+  R.of, // wrap frame in array
+  R.ap([leftHand, rightHand]), // Try to get left and right hand.
+  R.apply(R.lift(handDistance)) // Try to find the distance between them.
+);
+
+// handsStretchToMouse: (Frame, Frame) -> Maybe [Number]
+const handsStretchToMouse = R.pipe(
+  R.of, // wrap (frame, frame) in array
+  R.ap([curframe, lastframe]), // Get last and current frame
+  R.map(handsDistanceMaybe), // Get distance between hands (or nothing)
+  R.apply(R.liftN(2, R.subtract)) // subtract last distance from current.
+);
+
+// doMouseMove: [Number] -> EventManager -> IO ()
+const doMouseMove = R.curry((v, em) => IO(() => {
+  em.move(50, 50)
+    .then(() => em.mouseDown())
+    .then(() => em.moveRelative(...v))
+    .then(() => em.mouseUp())
+    .then(() => em.move(50,50));
+}));
+
+// doMouseScroll: Number -> EventManager -> IO ()
+const doMouseScroll = R.curry((z, em) => IO(() => {
+  em.move(50, 50)
+    .then(() => em.mouseDown(2))
+    .then(() => em.moveRelative(...[0, z]))
+    .then(() => em.mouseUp(2));
+}));
+
+// switchOnInput: (Frame, Frame) -> IO ()
+const switchOnInput = R.cond([
+  [R.compose(rightOnlyPinch, curframe), R.pipe(rightHandToMouse, R.map(doMouseMove))],
+  [R.compose(leftrightPinch, curframe), R.pipe(handsStretchToMouse, R.map(doMouseScroll))],
+  [R.always(true), M.Nothing]
+]);
+
+const runIO = R.invoker(0, 'runIO');
+
+function controllerLoop(eventManager) {
   return () => {
-    // Executes a function inside an IO context.
-    const runIO = R.invoker(0, 'runIO');
-
-    // PINCH_THRESHOLD: Number
-    const PINCH_THRESHOLD = 0.93;
-
-    // SCREEN_TO_HANDS_SCALE: Number
-    const SCREEN_TO_HANDS_SCALE = 10;
-
-    // getHand: String -> Frame -> Hand
-    const getHand = hand => R.pipe(
-      R.prop('hands'),
-      R.filter(R.propEq('type', hand)),
-      R.ifElse(R.isEmpty, M.Nothing, R.compose(M.Just, R.head))
-    );
-
-    // leftHand: Frame -> Hand
-    const leftHand = getHand('left');
-
-    // rightHand: Frame -> Hand
-    const rightHand = getHand('right');
-
-    // displacementSince: Frame -> Hand -> Leap.Vec3
-    const displacementSince = R.invoker(1, 'translation');
-
-    // pinchedDisplacement = Frame -> Hand -> Maybe Leap.Vec3
-    const pinchedDisplacement = lastFrame => R.ifElse(
-      R.propSatisfies(R.gte(R.__, PINCH_THRESHOLD), 'pinchStrength'),
-      R.compose(M.Just, displacementSince(lastFrame)),
-      M.Nothing
-    );
-
-    // toMouseMove: Leap.Vec3 -> [Number]
-    const toMouseMove = R.pipe(
-      R.map(R.multiply(SCREEN_TO_HANDS_SCALE)),
-      v => [v[0], -v[1]] // Get X and -Y displacement;
-    );
-
-    // doMouseMove: [Number] -> IO ();
-    const doMouseMove = v => IO(() => em.moveRelative(...v));
-
     let lastFrame;
     Leap.loop({
       frame: function (frame) {
@@ -90,23 +169,9 @@ function controllerLoop(em) {
           lastFrame = frame;
           return;
         }
-
-        // left: Hand
-        const left = leftHand(frame);
-
-        // right: Hand
-        const right = rightHand(frame);
-
-        // rightPinch: Maybe Leap.Vec3
-        const rightPinch = R.chain(pinchedDisplacement(lastFrame), right);
-
-        /* take the maybe-detected right hand to a possible
-         * displacement if pinching, convert to mouse displacement
-         * and send the mouse displacement to X server.
-         */
-        const mouseAction = R.map(R.compose(runIO, doMouseMove, toMouseMove), rightPinch);
-        log(`${rightPinch.toString()} \n time: ${delt()}`);
-
+        const action = R.ap(switchOnInput([lastFrame, frame]), M.Just(eventManager));
+        log(`${action.toString()} \n ${time()}`);
+        R.map(runIO, action);
         lastFrame = frame;
       }
     });
