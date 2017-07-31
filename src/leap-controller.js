@@ -8,19 +8,7 @@ const R = require('ramda');
 const M = require('ramda-fantasy').Maybe;
 const IO = require('ramda-fantasy').IO;
 
-x11.createClient((err, display) => {
-  const X = display.client;
-  exec("xwininfo | grep 'xwininfo: Window id:' | awk '{print $4}'", (err, stdout) => {
-    if (err) {
-      throw err;
-    }
-    const wid = Number(stdout.trim());
-    const em = new XEventManager(wid, X);
-    X.SetInputFocus(wid);
-    setTimeout(controllerLoop(em), 300);
-  });
-});
-
+// BEGIN debugging
 const Jetty = require('jetty');
 const jetty = new Jetty(process.stdout);
 
@@ -37,15 +25,33 @@ function time() {
   last = present();
   return out;
 }
+// END debugging
+
+x11.createClient((err, display) => {
+  const X = display.client;
+  exec("xwininfo | grep 'xwininfo: Window id:' | awk '{print $4}'", (err, stdout) => {
+    if (err) {
+      throw err;
+    }
+    const wid = Number(stdout.trim());
+    const em = new XEventManager(wid, X);
+    X.SetInputFocus(wid);
+    setTimeout(controllerLoop(em), 300);
+  });
+});
 
 // PINCH_THRESHOLD: Number
 const PINCH_THRESHOLD = 0.93;
 
 // SCREEN_TO_HANDS_SCALE: Number
-const SCREEN_TO_HANDS_SCALE = 7;
+const SCREEN_TO_HANDS_SCALE = 3;
 
 // SCROLL_TO_HANDS_SCALE: Number
-const SCROLL_TO_HANDS_SCALE = 0.0001;
+const SCROLL_TO_HANDS_SCALE = 2;
+
+// last Frame and current frame getters: [Frame, Frame] -> Frame
+const lastframe = a => a[0];
+const curframe = a => a[1];
 
 // getHand: String -> Frame -> Maybe Hand
 const getHand = hand => R.pipe(
@@ -69,24 +75,11 @@ const isPinched = M.maybe(
   R.propSatisfies(R.gte(R.__, PINCH_THRESHOLD), 'pinchStrength')
 );
 
-// toMouseMove: Leap.Vec3 -> (Number, Number)
-const toMouseMove = R.pipe(
-  R.map(R.multiply(SCREEN_TO_HANDS_SCALE)),
-  v => [v[0], -v[1]] // Get X and -Y displacement;
-);
-
-// toMouseScroll: [Number] -> [Number]
-const toMouseScroll = R.map(
-  R.pipe(
-    R.multiply(-1),
-    R.multiply(SCROLL_TO_HANDS_SCALE)
-  )
-);
-
-
-// last Frame and current frame getters: (Frame, Frame) -> Frame
-const lastframe = a => a[0];
-const curframe = a => a[1];
+// isExtended = String -> Maybe Hand -> Boolean
+const isExtended = finger => M.maybe(
+  false,
+  R.pathEq([finger, 'extended'], true)
+)
 
 // rightOnlyPinch: Frame -> Boolean
 const rightOnlyPinch = R.allPass([
@@ -100,7 +93,24 @@ const leftrightPinch = R.allPass([
   R.compose(isPinched, leftHand)
 ]);
 
-// rightHandToMouse: (Frame, Frame) -> Maybe (Number, Number)
+// rightHandLShape: Frame -> Boolean
+const rightHandLShape = R.allPass([
+  R.compose(isExtended('thumb'), rightHand),
+  R.compose(isExtended('indexFinger'), rightHand),
+  R.compose(R.not, isExtended('middleFinger'), rightHand),
+  R.compose(R.not, isExtended('ringFinger'), rightHand),
+  R.compose(R.not, isExtended('pinky'), rightHand)
+]);
+
+// toMouseMove: Leap.Vec3 -> (Number, Number)
+const toMouseMove = R.pipe(
+  // Scale each vector components to screen
+  R.map(R.multiply(SCREEN_TO_HANDS_SCALE)),
+  // Get X and -Y displacement
+  v => [v[0], -v[1]]
+);
+
+// rightHandToMouse: [Frame, Frame] -> Maybe (Number, Number)
 const rightHandToMouse = R.pipe(
   // wrap (frame, frame) in array
   R.of,
@@ -110,6 +120,12 @@ const rightHandToMouse = R.pipe(
   R.apply(R.call),
   // Map to screen distplacement
   R.map(toMouseMove)
+);
+
+// toMiddleMouseDrag: Number -> Number
+const toMiddleMouseDrag = R.pipe(
+  R.multiply(-1),
+  R.multiply(SCROLL_TO_HANDS_SCALE)
 );
 
 // handDistance: Hand -> Hand -> Number
@@ -126,35 +142,32 @@ const handsDistanceMaybe = R.pipe(
   R.apply(R.lift(handDistance)) // Try to find the distance between them.
 );
 
-// handsStretchToMouse: (Frame, Frame) -> Maybe [Number]
+// handsStretchToMouse: [Frame, Frame] -> Maybe Number
 const handsStretchToMouse = R.pipe(
-  R.of, // wrap (frame, frame) in array
+  R.of, // wrap [frame, frame] in array
   R.ap([curframe, lastframe]), // Get last and current frame
-  R.map(handsDistanceMaybe), // Get distance between hands (or nothing)
-  R.apply(R.liftN(2, R.subtract)) // subtract last distance from current.
+  R.map(handsDistanceMaybe), // Get distance between hands (or nothing if there is 1 hand)
+  R.apply(R.liftN(2, R.subtract)), // subtract last distance from current.
+  R.map(R.compose(R.prepend(0), R.of, toMiddleMouseDrag)) // Convert to middle mouse drag vector
 );
 
-// doMouseMove: [Number] -> EventManager -> IO ()
-const doMouseMove = R.curry((v, em) => IO(() => {
+
+// doMouseDrag: [Number] -> EventManager -> IO ()
+const doMouseDrag = R.curry((clickCode, v, em) => IO(() => {
   em.move(50, 50)
-    .then(() => em.mouseDown())
+    .then(() => em.mouseDown(clickCode))
     .then(() => em.moveRelative(...v))
-    .then(() => em.mouseUp())
-    .then(() => em.move(50,50));
+    .then(() => em.mouseUp(clickCode))
+    .then(() => em.move(50, 50));
 }));
 
-// doMouseScroll: Number -> EventManager -> IO ()
-const doMouseScroll = R.curry((z, em) => IO(() => {
-  em.move(50, 50)
-    .then(() => em.mouseDown(2))
-    .then(() => em.moveRelative(...[0, z]))
-    .then(() => em.mouseUp(2));
-}));
-
-// switchOnInput: (Frame, Frame) -> IO ()
+// switchOnInput: [Frame, Frame] -> Maybe (IO ())
 const switchOnInput = R.cond([
-  [R.compose(rightOnlyPinch, curframe), R.pipe(rightHandToMouse, R.map(doMouseMove))],
-  [R.compose(leftrightPinch, curframe), R.pipe(handsStretchToMouse, R.map(doMouseScroll))],
+  // [If([frame, frame]), Then([frame, frame])]
+  [R.compose(rightOnlyPinch, curframe), R.pipe(rightHandToMouse, R.map(doMouseDrag(1)))],
+  [R.compose(leftrightPinch, curframe), R.pipe(handsStretchToMouse, R.map(doMouseDrag(2)))],
+  [R.compose(rightHandLShape, curframe), R.pipe(rightHandToMouse, R.map(doMouseDrag(3)))],
+  // [Else(), Nothing]
   [R.always(true), M.Nothing]
 ]);
 
@@ -170,7 +183,7 @@ function controllerLoop(eventManager) {
           return;
         }
         const action = R.ap(switchOnInput([lastFrame, frame]), M.Just(eventManager));
-        log(`${action.toString()} \n ${time()}`);
+        log(`${action.toString()}\n${time()}\n`);
         R.map(runIO, action);
         lastFrame = frame;
       }

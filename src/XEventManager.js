@@ -18,7 +18,6 @@ module.exports = class XEventManager {
   	});
   }
   move (xPercent, yPercent) {
-    console.log(this.width, this.height);
    	const x = Math.round(this.width * (xPercent/100));
   	const y = Math.round(this.height * (yPercent/100));
   	return Promise.resolve(this.X.WarpPointer(0,this.wid,0,0,0,0,x,y));
